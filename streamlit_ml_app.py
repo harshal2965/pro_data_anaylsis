@@ -3,11 +3,15 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import plotly.express as px
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedShuffleSplit
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import accuracy_score, r2_score, classification_report, mean_squared_error
+from sklearn.metrics import (accuracy_score, r2_score, classification_report, mean_squared_error, 
+                            precision_score, recall_score, f1_score, confusion_matrix)
 from sklearn.preprocessing import LabelEncoder
+from imblearn.over_sampling import SMOTE
+from imblearn.combine import SMOTEENN
+import seaborn as sns
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -175,6 +179,42 @@ if uploaded_file is not None:
             help="Choose the columns to use as input features for the model"
         )
         
+        # Advanced Options for Classification
+        if prediction_type == "Classification":
+            st.sidebar.subheader("🔧 Advanced Options")
+            
+            # Class balancing options
+            class_balance_method = st.sidebar.selectbox(
+                "Class Balancing Method:",
+                ["None", "SMOTE", "SMOTE + ENN"],
+                help="Choose a method to handle class imbalance"
+            )
+            
+            # Stratification option
+            use_stratification = st.sidebar.checkbox(
+                "Use Stratified Sampling",
+                value=True,
+                help="Maintain class distribution in train-test split"
+            )
+            
+            # Display class distribution
+            if target_variable:
+                st.sidebar.write("**Current Class Distribution:**")
+                class_dist = df[target_variable].value_counts()
+                for class_name, count in class_dist.items():
+                    percentage = (count / len(df)) * 100
+                    st.sidebar.write(f"- {class_name}: {count} ({percentage:.1f}%)")
+        
+        # Test size selection
+        test_size = st.sidebar.slider(
+            "Test Set Size:",
+            min_value=0.1,
+            max_value=0.5,
+            value=0.2,
+            step=0.05,
+            help="Proportion of dataset to use for testing"
+        )
+        
         # Model Training Button
         if selected_features:
             train_model = st.sidebar.button("🚀 Train Model & Predict", type="primary")
@@ -223,9 +263,72 @@ if uploaded_file is not None:
                             target_classes = None
                     
                     # Train-test split
-                    X_train, X_test, y_train, y_test = train_test_split(
-                        X_encoded, y_encoded, test_size=0.2, random_state=42
-                    )
+                    with st.spinner("🔀 Splitting data..."):
+                        if prediction_type == "Classification" and use_stratification:
+                            # Use stratified split to maintain class distribution
+                            sss = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=42)
+                            train_idx, test_idx = next(sss.split(X_encoded, y_encoded))
+                            X_train, X_test = X_encoded.iloc[train_idx], X_encoded.iloc[test_idx]
+                            y_train, y_test = y_encoded[train_idx], y_encoded[test_idx]
+                        else:
+                            # Regular train-test split
+                            X_train, X_test, y_train, y_test = train_test_split(
+                                X_encoded, y_encoded, test_size=test_size, random_state=42
+                            )
+                    
+                    # Apply SMOTE if selected (only for classification)
+                    if prediction_type == "Classification" and class_balance_method != "None":
+                        with st.spinner(f"⚖️ Applying {class_balance_method} for class balancing..."):
+                            original_train_dist = pd.Series(y_train).value_counts().sort_index()
+                            
+                            if class_balance_method == "SMOTE":
+                                smote = SMOTE(random_state=42)
+                                X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
+                            elif class_balance_method == "SMOTE + ENN":
+                                smote_enn = SMOTEENN(random_state=42)
+                                X_train_balanced, y_train_balanced = smote_enn.fit_resample(X_train, y_train)
+                            
+                            balanced_train_dist = pd.Series(y_train_balanced).value_counts().sort_index()
+                            
+                            # Show balancing results
+                            st.info(f"✅ Applied {class_balance_method}: {len(X_train)} → {len(X_train_balanced)} samples")
+                            
+                            X_train, y_train = X_train_balanced, y_train_balanced
+                    
+                    # Display data split information
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.info(f"**Training Set:** {len(X_train)} samples")
+                    with col2:
+                        st.info(f"**Test Set:** {len(X_test)} samples")
+                    with col3:
+                        if prediction_type == "Classification":
+                            st.info(f"**Classes:** {len(np.unique(y_encoded))}")
+                        else:
+                            st.info(f"**Target Range:** {y_encoded.min():.2f} - {y_encoded.max():.2f}")
+                    
+                    # Show class distribution after balancing
+                    if prediction_type == "Classification" and class_balance_method != "None":
+                        st.subheader("📊 Class Distribution Comparison")
+                        
+                        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+                        
+                        # Original distribution
+                        original_train_dist.plot(kind='bar', ax=ax1, color='lightcoral', alpha=0.7)
+                        ax1.set_title('Original Training Set Distribution')
+                        ax1.set_xlabel('Class')
+                        ax1.set_ylabel('Count')
+                        ax1.tick_params(axis='x', rotation=45)
+                        
+                        # Balanced distribution
+                        balanced_train_dist.plot(kind='bar', ax=ax2, color='lightgreen', alpha=0.7)
+                        ax2.set_title(f'After {class_balance_method} Distribution')
+                        ax2.set_xlabel('Class')
+                        ax2.set_ylabel('Count')
+                        ax2.tick_params(axis='x', rotation=45)
+                        
+                        plt.tight_layout()
+                        st.pyplot(fig)
                     
                     # Model selection and training
                     with st.spinner("🤖 Training model..."):
@@ -263,30 +366,126 @@ if uploaded_file is not None:
                     st.subheader("📊 Model Performance")
                     
                     if prediction_type == "Classification":
+                        # Calculate all classification metrics
                         accuracy = accuracy_score(y_test, y_pred)
-                        st.metric("Accuracy Score", f"{accuracy:.4f}", f"{accuracy*100:.2f}%")
                         
-                        # Classification report
+                        # Handle multi-class vs binary classification for averaging
+                        avg_method = 'binary' if len(np.unique(y_test)) == 2 else 'weighted'
+                        
+                        precision = precision_score(y_test, y_pred, average=avg_method, zero_division=0)
+                        recall = recall_score(y_test, y_pred, average=avg_method, zero_division=0)
+                        f1 = f1_score(y_test, y_pred, average=avg_method, zero_division=0)
+                        
+                        # Display main metrics in columns
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Accuracy", f"{accuracy:.4f}", f"{accuracy*100:.2f}%")
+                        with col2:
+                            st.metric("Precision", f"{precision:.4f}", f"{precision*100:.2f}%")
+                        with col3:
+                            st.metric("Recall", f"{recall:.4f}", f"{recall*100:.2f}%")
+                        with col4:
+                            st.metric("F1-Score", f"{f1:.4f}", f"{f1*100:.2f}%")
+                        
+                        # Detailed classification report with support
+                        st.subheader("📋 Detailed Classification Report")
+                        
                         if target_classes is not None:
                             y_test_labels = le.inverse_transform(y_test)
                             y_pred_labels = le.inverse_transform(y_pred)
-                            report = classification_report(y_test_labels, y_pred_labels, output_dict=True)
+                            report_dict = classification_report(y_test_labels, y_pred_labels, output_dict=True)
                         else:
-                            report = classification_report(y_test, y_pred, output_dict=True)
+                            report_dict = classification_report(y_test, y_pred, output_dict=True)
                         
-                        st.write("**Detailed Classification Report:**")
-                        report_df = pd.DataFrame(report).transpose()
-                        st.dataframe(report_df.round(4))
+                        # Convert to DataFrame and format
+                        report_df = pd.DataFrame(report_dict).transpose()
+                        
+                        # Round values for better display
+                        numeric_columns = ['precision', 'recall', 'f1-score']
+                        for col in numeric_columns:
+                            if col in report_df.columns:
+                                report_df[col] = report_df[col].round(4)
+                        
+                        # Format support as integer
+                        if 'support' in report_df.columns:
+                            report_df['support'] = report_df['support'].astype('Int64')
+                        
+                        st.dataframe(report_df)
+                        
+                        # Confusion Matrix
+                        st.subheader("🔍 Confusion Matrix")
+                        
+                        cm = confusion_matrix(y_test, y_pred)
+                        
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        
+                        # Use class labels if available
+                        if target_classes is not None:
+                            labels = target_classes
+                        else:
+                            labels = np.unique(y_test)
+                        
+                        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                                   xticklabels=labels, yticklabels=labels, ax=ax)
+                        ax.set_xlabel('Predicted')
+                        ax.set_ylabel('Actual')
+                        ax.set_title('Confusion Matrix')
+                        
+                        st.pyplot(fig)
+                        
+                        # Per-class metrics breakdown
+                        if len(np.unique(y_test)) > 2:
+                            st.subheader("📊 Per-Class Metrics")
+                            
+                            # Calculate per-class metrics
+                            precision_per_class = precision_score(y_test, y_pred, average=None, zero_division=0)
+                            recall_per_class = recall_score(y_test, y_pred, average=None, zero_division=0)
+                            f1_per_class = f1_score(y_test, y_pred, average=None, zero_division=0)
+                            
+                            # Create DataFrame for per-class metrics
+                            class_labels = target_classes if target_classes is not None else np.unique(y_test)
+                            
+                            per_class_df = pd.DataFrame({
+                                'Class': class_labels,
+                                'Precision': precision_per_class,
+                                'Recall': recall_per_class,
+                                'F1-Score': f1_per_class
+                            })
+                            
+                            # Bar chart for per-class metrics
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            x = np.arange(len(class_labels))
+                            width = 0.25
+                            
+                            ax.bar(x - width, precision_per_class, width, label='Precision', alpha=0.8)
+                            ax.bar(x, recall_per_class, width, label='Recall', alpha=0.8)
+                            ax.bar(x + width, f1_per_class, width, label='F1-Score', alpha=0.8)
+                            
+                            ax.set_xlabel('Classes')
+                            ax.set_ylabel('Score')
+                            ax.set_title('Per-Class Performance Metrics')
+                            ax.set_xticks(x)
+                            ax.set_xticklabels(class_labels, rotation=45)
+                            ax.legend()
+                            ax.grid(True, alpha=0.3)
+                            
+                            plt.tight_layout()
+                            st.pyplot(fig)
+                            
+                            st.dataframe(per_class_df.round(4))
                         
                     else:  # Regression
                         r2 = r2_score(y_test, y_pred)
                         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+                        mae = np.mean(np.abs(y_test - y_pred))
                         
-                        col1, col2 = st.columns(2)
+                        col1, col2, col3 = st.columns(3)
                         with col1:
                             st.metric("R² Score", f"{r2:.4f}", f"{r2*100:.2f}%")
                         with col2:
                             st.metric("RMSE", f"{rmse:.4f}")
+                        with col3:
+                            st.metric("MAE", f"{mae:.4f}")
                     
                     # Feature Importance Plot
                     st.subheader("📈 Feature Importance")
